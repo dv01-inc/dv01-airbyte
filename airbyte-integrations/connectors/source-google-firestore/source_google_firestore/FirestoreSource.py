@@ -34,3 +34,8 @@ class FirestoreSource:
 
     def get_sub_collections(self, collection_name: str, document_id: str):
         return self.client.collection(collection_name).document(document_id).collections()
+    
+    def close(self):
+        """Close the Firestore client to release resources."""
+        if self.client:
+            self.client.close()

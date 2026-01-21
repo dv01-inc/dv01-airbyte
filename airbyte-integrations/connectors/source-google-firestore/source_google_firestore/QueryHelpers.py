@@ -50,12 +50,18 @@ class QueryHelpers:
         return base_query
 
     def get_sub_collection_documents(self, parent_id):
+        """
+        Stream sub-collection documents to avoid loading all into memory at once.
+        """
         firestore = self.firestore
         sub_collections_documents = {}
         # Fetch documents from sub-collections
         for sub_collection in firestore.get_sub_collections(self.collection_name, str(parent_id)):
             sub_collection_name = sub_collection.id
-            documents = [child_doc.to_dict() for child_doc in sub_collection.stream()]
+            # Stream documents instead of loading all at once
+            documents = []
+            for child_doc in sub_collection.stream():
+                documents.append(child_doc.to_dict())
             sub_collections_documents[sub_collection_name] = documents
 
         return sub_collections_documents
@@ -68,21 +74,36 @@ class QueryHelpers:
             documents.append(parent_doc | sub_collections_documents)
         return documents
 
-    def fetch_records(self, start_at=None, cursor_value=None, data=[]) -> list[dict]:
+    def fetch_records(self, cursor_value=None):
+        """
+        Generator that yields documents in batches to avoid loading all data into memory.
+        This prevents memory leaks when dealing with large collections.
+        """
         logger = self.logger
+        start_at = None
+        total_documents = 0
 
-        base_query = self.get_documents_query(start_at, cursor_value)
-        documents = [doc.to_dict() for doc in base_query.stream()]
-
-        if self.append_sub_collections:
-            documents = self.handle_sub_collections(documents)
-
-        data.extend(documents)
-
-        next_start_at = documents[-1] if documents else None
-
-        if next_start_at is not None:
-            logger.info(f"Fetching next batch of documents. Last document: {next_start_at[self.primary_key]} Total documents: {len(data)}")
-            return self.fetch_records(next_start_at, cursor_value, data)
-        else:
-            return data
+        while True:
+            base_query = self.get_documents_query(start_at, cursor_value)
+            # Process documents one at a time instead of loading all into list
+            documents_batch = []
+            for doc in base_query.stream():
+                documents_batch.append(doc.to_dict())
+            
+            if not documents_batch:
+                break
+            
+            if self.append_sub_collections:
+                documents_batch = self.handle_sub_collections(documents_batch)
+            
+            # Yield the batch instead of accumulating
+            for doc in documents_batch:
+                yield doc
+            
+            total_documents += len(documents_batch)
+            start_at = documents_batch[-1]
+            
+            logger.info(f"Fetching next batch of documents. Last document: {start_at[self.primary_key]} Total documents processed: {total_documents}")
+            
+            # Clear batch to free memory
+            documents_batch = None

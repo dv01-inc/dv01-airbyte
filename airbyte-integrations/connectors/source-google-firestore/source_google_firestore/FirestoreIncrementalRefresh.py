@@ -60,16 +60,18 @@ class FirestoreIncrementalRefresh(IncrementalMixin, ABC):
         timeframes = self.chunk_time(last_updated_at) if last_updated_at else None
 
         if timeframes is None or not timeframes:
-            documents = query.fetch_records()
-            for airbyte_message in airbyte.send_airbyte_message(documents):
-                yield airbyte_message
+            # Stream documents one at a time to avoid memory accumulation
+            for document in query.fetch_records():
+                for airbyte_message in airbyte.send_airbyte_message([document]):
+                    yield airbyte_message
             self._cursor_value = datetime.utcnow()
             yield AirbyteMessage(type=Type.STATE, state=AirbyteStateMessage(data=self.state))
         else:
             for timeframe in timeframes:
                 self.logger.info(f"Fetching documents from {timeframe['start_at']} to {timeframe['end_at']}")
-                documents: list[dict] = query.fetch_records(cursor_value=timeframe)
-                for airbyte_message in airbyte.send_airbyte_message(documents):
-                    yield airbyte_message
+                # Stream documents one at a time instead of loading all into memory
+                for document in query.fetch_records(cursor_value=timeframe):
+                    for airbyte_message in airbyte.send_airbyte_message([document]):
+                        yield airbyte_message
                 self._cursor_value = timeframe[self.cursor_field]
                 yield AirbyteMessage(type=Type.STATE, state=AirbyteStateMessage(data=self.state))
