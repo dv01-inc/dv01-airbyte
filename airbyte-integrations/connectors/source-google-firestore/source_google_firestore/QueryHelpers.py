@@ -76,7 +76,7 @@ class QueryHelpers:
 
     def fetch_records(self, cursor_value=None):
         """
-        Generator that yields documents in batches to avoid loading all data into memory.
+        Generator that yields documents one at a time to avoid loading all data into memory.
         This prevents memory leaks when dealing with large collections.
         """
         logger = self.logger
@@ -85,25 +85,25 @@ class QueryHelpers:
 
         while True:
             base_query = self.get_documents_query(start_at, cursor_value)
-            # Process documents one at a time instead of loading all into list
-            documents_batch = []
-            for doc in base_query.stream():
-                documents_batch.append(doc.to_dict())
+            # Stream documents one at a time without batching
+            document_count = 0
+            last_doc = None
             
-            if not documents_batch:
+            for doc in base_query.stream():
+                doc_dict = doc.to_dict()
+                
+                if self.append_sub_collections:
+                    # Process sub-collections for this single document
+                    sub_collections_documents = self.get_sub_collection_documents(doc_dict[self.primary_key])
+                    doc_dict = doc_dict | sub_collections_documents
+                
+                yield doc_dict
+                document_count += 1
+                total_documents += 1
+                last_doc = doc_dict
+            
+            if document_count == 0:
                 break
             
-            if self.append_sub_collections:
-                documents_batch = self.handle_sub_collections(documents_batch)
-            
-            # Yield the batch instead of accumulating
-            for doc in documents_batch:
-                yield doc
-            
-            total_documents += len(documents_batch)
-            start_at = documents_batch[-1]
-            
+            start_at = last_doc
             logger.info(f"Fetching next batch of documents. Last document: {start_at[self.primary_key]} Total documents processed: {total_documents}")
-            
-            # Clear batch to free memory
-            documents_batch = None
