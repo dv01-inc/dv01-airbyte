@@ -49,21 +49,41 @@ class QueryHelpers:
 
         return base_query
 
-    def get_sub_collection_documents(self, parent_id):
+    def get_sub_collection_documents(self, parent_id, max_sub_docs=1000):
         """
-        Stream sub-collection documents to avoid loading all into memory at once.
+        Fetch sub-collection documents for a parent document.
+        
+        Note: Sub-collections are accumulated in memory per parent document as they need to be 
+        merged with the parent. To prevent unbounded memory growth, we limit to max_sub_docs
+        per sub-collection.
+        
+        Args:
+            parent_id: The ID of the parent document
+            max_sub_docs: Maximum number of documents to fetch per sub-collection (default: 1000)
+        
+        Returns:
+            Dictionary mapping sub-collection names to lists of documents
         """
         firestore = self.firestore
         sub_collections_documents = {}
+        
         # Fetch documents from sub-collections
         for sub_collection in firestore.get_sub_collections(self.collection_name, str(parent_id)):
             sub_collection_name = sub_collection.id
-            # Stream documents instead of loading all at once
             documents = []
-            for child_doc in sub_collection.stream():
+            
+            # Limit sub-collection size to prevent unbounded memory growth
+            for i, child_doc in enumerate(sub_collection.stream()):
+                if i >= max_sub_docs:
+                    self.logger.warning(
+                        f"Sub-collection '{sub_collection_name}' for document '{parent_id}' "
+                        f"exceeded {max_sub_docs} documents. Additional documents will be skipped."
+                    )
+                    break
                 documents.append(child_doc.to_dict())
+            
             sub_collections_documents[sub_collection_name] = documents
-
+        
         return sub_collections_documents
 
     def handle_sub_collections(self, parent_documents: list):
@@ -91,6 +111,11 @@ class QueryHelpers:
             
             for doc in base_query.stream():
                 doc_dict = doc.to_dict()
+                
+                # Verify primary key exists in document
+                if self.primary_key not in doc_dict:
+                    logger.warning(f"Document missing primary key '{self.primary_key}', skipping")
+                    continue
                 
                 if self.append_sub_collections:
                     # Process sub-collections for this single document

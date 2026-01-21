@@ -38,4 +38,10 @@ class FirestoreSource:
     def close(self):
         """Close the Firestore client to release resources."""
         if self.client:
-            self.client.close()
+            try:
+                self.client.close()
+            except Exception as e:
+                # Log but don't raise to ensure cleanup continues
+                pass
+            finally:
+                self.client = None
