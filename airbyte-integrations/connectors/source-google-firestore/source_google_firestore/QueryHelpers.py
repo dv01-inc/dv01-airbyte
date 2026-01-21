@@ -168,18 +168,21 @@ class QueryHelpers:
                     document_count += 1
                     total_documents += 1
                     last_doc = doc_dict
-            except Exception as e:
-                logger.error(f"Error during batch processing: {str(e)}. Retrying...")
+            except (Exception) as e:
+                # Catch Firestore-specific and network errors
+                logger.error(f"Error during batch processing: {type(e).__name__}: {str(e)}. Retrying...")
                 retry_count += 1
-                continue
+                # Don't continue immediately - let the retry logic below handle it
             
             # If we got documents, reset retry counter
             if document_count > 0:
                 retry_count = 0
                 batch_duration = time.time() - batch_start_time
+                # Safely access primary key with .get() to avoid KeyError
+                last_doc_id = last_doc.get(self.primary_key, "unknown") if last_doc else "unknown"
                 logger.info(
                     f"Fetched batch of {document_count} documents in {batch_duration:.2f}s. "
-                    f"Total documents: {total_documents}. Last document: {last_doc[self.primary_key]}"
+                    f"Total documents: {total_documents}. Last document: {last_doc_id}"
                 )
                 start_at = last_doc
             else:
@@ -187,9 +190,8 @@ class QueryHelpers:
                 retry_count += 1
                 logger.info(f"Empty batch received. Retry count: {retry_count}/{max_retries}")
                 
-                # If we got 0 documents, we've reached the end
-                if retry_count >= 1:  # Stop on first empty batch
-                    logger.info(f"No more documents to fetch. Total processed: {total_documents}")
-                    break
+                # Stop on first empty batch (normal end of collection)
+                logger.info(f"No more documents to fetch. Total processed: {total_documents}")
+                break
         
         logger.info(f"Completed fetch_records. Total documents processed: {total_documents}")
