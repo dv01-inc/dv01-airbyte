@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Union
 
 from airbyte_cdk import AirbyteLogger
@@ -94,41 +95,101 @@ class QueryHelpers:
             documents.append(parent_doc | sub_collections_documents)
         return documents
 
-    def fetch_records(self, cursor_value=None):
+    def fetch_records(self, cursor_value=None, max_retries=5, max_duration_seconds=7200):
         """
         Generator that yields documents one at a time to avoid loading all data into memory.
         This prevents memory leaks when dealing with large collections.
+        
+        Safety mechanisms:
+        - max_retries: Maximum number of pagination attempts (default: 5)
+        - max_duration_seconds: Maximum time to spend fetching (default: 7200 seconds / 2 hours)
+        
+        Args:
+            cursor_value: Optional cursor value for incremental syncs
+            max_retries: Maximum number of empty batch retries before stopping
+            max_duration_seconds: Maximum time in seconds before stopping
         """
         logger = self.logger
         start_at = None
         total_documents = 0
+        retry_count = 0
+        start_time = time.time()
+        
+        # Safety check: ensure we have a time limit
+        if max_duration_seconds <= 0:
+            max_duration_seconds = 7200  # Default to 2 hours
+        
+        logger.info(f"Starting fetch_records with max_retries={max_retries}, max_duration={max_duration_seconds}s")
 
         while True:
+            # Safety check 1: Check time limit
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= max_duration_seconds:
+                logger.warning(
+                    f"Reached maximum time limit of {max_duration_seconds} seconds. "
+                    f"Total documents processed: {total_documents}. Stopping gracefully."
+                )
+                break
+            
+            # Safety check 2: Check retry limit
+            if retry_count >= max_retries:
+                logger.warning(
+                    f"Reached maximum retry limit of {max_retries} attempts. "
+                    f"Total documents processed: {total_documents}. Stopping gracefully."
+                )
+                break
+            
             base_query = self.get_documents_query(start_at, cursor_value)
             # Stream documents one at a time without batching
             document_count = 0
             last_doc = None
+            batch_start_time = time.time()
             
-            for doc in base_query.stream():
-                doc_dict = doc.to_dict()
-                
-                # Verify primary key exists in document
-                if self.primary_key not in doc_dict:
-                    logger.warning(f"Document missing primary key '{self.primary_key}', skipping")
-                    continue
-                
-                if self.append_sub_collections:
-                    # Process sub-collections for this single document
-                    sub_collections_documents = self.get_sub_collection_documents(doc_dict[self.primary_key])
-                    doc_dict = doc_dict | sub_collections_documents
-                
-                yield doc_dict
-                document_count += 1
-                total_documents += 1
-                last_doc = doc_dict
+            try:
+                for doc in base_query.stream():
+                    # Safety check 3: Check time limit within batch
+                    if time.time() - start_time >= max_duration_seconds:
+                        logger.warning(f"Time limit reached during batch processing. Stopping gracefully.")
+                        return
+                    
+                    doc_dict = doc.to_dict()
+                    
+                    # Verify primary key exists in document
+                    if self.primary_key not in doc_dict:
+                        logger.warning(f"Document missing primary key '{self.primary_key}', skipping")
+                        continue
+                    
+                    if self.append_sub_collections:
+                        # Process sub-collections for this single document
+                        sub_collections_documents = self.get_sub_collection_documents(doc_dict[self.primary_key])
+                        doc_dict = doc_dict | sub_collections_documents
+                    
+                    yield doc_dict
+                    document_count += 1
+                    total_documents += 1
+                    last_doc = doc_dict
+            except Exception as e:
+                logger.error(f"Error during batch processing: {str(e)}. Retrying...")
+                retry_count += 1
+                continue
             
-            if document_count == 0:
-                break
-            
-            start_at = last_doc
-            logger.info(f"Fetching next batch of documents. Last document: {start_at[self.primary_key]} Total documents processed: {total_documents}")
+            # If we got documents, reset retry counter
+            if document_count > 0:
+                retry_count = 0
+                batch_duration = time.time() - batch_start_time
+                logger.info(
+                    f"Fetched batch of {document_count} documents in {batch_duration:.2f}s. "
+                    f"Total documents: {total_documents}. Last document: {last_doc[self.primary_key]}"
+                )
+                start_at = last_doc
+            else:
+                # No documents in this batch - increment retry counter
+                retry_count += 1
+                logger.info(f"Empty batch received. Retry count: {retry_count}/{max_retries}")
+                
+                # If we got 0 documents, we've reached the end
+                if retry_count >= 1:  # Stop on first empty batch
+                    logger.info(f"No more documents to fetch. Total processed: {total_documents}")
+                    break
+        
+        logger.info(f"Completed fetch_records. Total documents processed: {total_documents}")
