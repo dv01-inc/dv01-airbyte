@@ -15,6 +15,16 @@ class FirestoreFullRefresh:
         self.logger = logger
 
     def stream(self):
-        documents: list[dict] = self.query.fetch_records()
-        self.logger.info(f"Finished fetching documents. Total documents: {len(documents)}")
-        return self.airbyte.send_airbyte_message(documents)
+        """
+        Stream documents to avoid loading all into memory.
+        Yields Airbyte messages one at a time.
+        """
+        total_documents = 0
+        # Use generator to avoid loading all documents into memory
+        for document in self.query.fetch_records():
+            total_documents += 1
+            # Yield messages one at a time
+            for message in self.airbyte.send_airbyte_message([document]):
+                yield message
+        
+        self.logger.info(f"Finished streaming documents. Total documents: {total_documents}")
